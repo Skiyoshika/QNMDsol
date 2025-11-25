@@ -1,0 +1,23 @@
+# Rust 编译生成的文件 (巨大，绝对不要传)
+/target/
+
+# Windows 编译产生的调试符号
+*.pdb
+
+# 依赖的 DLL 和 Lib (太大了，且每个人环境不同，不应该传)
+*.dll
+*.lib
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 你录制的个人脑波数据 (隐私，且占空间)
+*.csv
+
+# VS Code 配置 (可选)
+.vscode/
+
+# 操作系统生成的垃圾文件
+.DS_Store
+Thumbs.db
