@@ -133,3 +133,8 @@ The developer is not responsible for emotional damage caused by in-game deaths (
 MIT License
 
 Made with ❤️ and 🧠 by Independent Developer.
+
+## AI Pipeline (demo/offline)
+- Run 	rainer\run_all.bat to convert PhysioNet EEGMI (R07-10) and train CSP+LDA, output rain_model.json in project root.
+- GUI left panel supports setting model path and Load/Reload; right status panel shows per-class probabilities (random stub when no real inference).
+- Classes map to: left/right/fists/feet (demo用途)，真实指令需用你自己的帽子重新采集/重训。

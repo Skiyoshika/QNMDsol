@@ -4,11 +4,9 @@ use once_cell::sync::OnceCell;
 use serde::Serialize;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int};
-
 const BOARD_ID_CYTON_DAISY: c_int = 2; // matches python trainer script
 const PRESET_DEFAULT: c_int = 0;
 const STREAM_RINGBUF_PACKETS: c_int = 450_000;
-
 #[derive(Serialize)]
 struct BrainFlowInputParams {
     serial_port: String,
@@ -28,7 +26,6 @@ struct BrainFlowInputParams {
     file_anc: String,
     master_board: i32,
 }
-
 impl BrainFlowInputParams {
     fn for_serial(port: &str) -> Self {
         Self {
@@ -51,7 +48,6 @@ impl BrainFlowInputParams {
         }
     }
 }
-
 struct BrainFlowApi {
     #[allow(dead_code)]
     lib: Library,
@@ -71,13 +67,11 @@ struct BrainFlowApi {
         *const c_char,
     ) -> c_int,
 }
-
 impl BrainFlowApi {
     fn load() -> Result<Self> {
         // BoardController.dll must be next to the executable (already shipped in repo root).
         let lib = unsafe { Library::new("BoardController.dll") }
             .context("BoardController.dll not found in working directory")?;
-
         // Safety: we assume BrainFlow C API signatures from the official package.
         unsafe {
             Ok(Self {
@@ -93,12 +87,10 @@ impl BrainFlowApi {
             })
         }
     }
-
     fn instance() -> Result<&'static BrainFlowApi> {
         static API: OnceCell<BrainFlowApi> = OnceCell::new();
         API.get_or_try_init(Self::load)
     }
-
     fn check(code: c_int, ctx: &str) -> Result<()> {
         if code == 0 {
             Ok(())
@@ -106,26 +98,37 @@ impl BrainFlowApi {
             Err(anyhow!("{ctx} failed (BrainFlow code {code})"))
         }
     }
-
     fn prepare(&self, board_id: c_int, input: &CString) -> Result<()> {
-        Self::check(unsafe { (self.prepare_session)(board_id, input.as_ptr()) }, "prepare_session")
+        Self::check(
+            unsafe { (self.prepare_session)(board_id, input.as_ptr()) },
+            "prepare_session",
+        )
     }
-
     fn start_stream(&self, board_id: c_int, input: &CString) -> Result<()> {
         Self::check(
-            unsafe { (self.start_stream)(STREAM_RINGBUF_PACKETS, std::ptr::null(), board_id, input.as_ptr()) },
+            unsafe {
+                (self.start_stream)(
+                    STREAM_RINGBUF_PACKETS,
+                    std::ptr::null(),
+                    board_id,
+                    input.as_ptr(),
+                )
+            },
             "start_stream",
         )
     }
-
     fn stop_stream(&self, board_id: c_int, input: &CString) -> Result<()> {
-        Self::check(unsafe { (self.stop_stream)(board_id, input.as_ptr()) }, "stop_stream")
+        Self::check(
+            unsafe { (self.stop_stream)(board_id, input.as_ptr()) },
+            "stop_stream",
+        )
     }
-
     fn release(&self, board_id: c_int, input: &CString) -> Result<()> {
-        Self::check(unsafe { (self.release_session)(board_id, input.as_ptr()) }, "release_session")
+        Self::check(
+            unsafe { (self.release_session)(board_id, input.as_ptr()) },
+            "release_session",
+        )
     }
-
     fn sampling_rate(&self, board_id: c_int) -> Result<c_int> {
         let mut rate: c_int = 0;
         Self::check(
@@ -134,7 +137,6 @@ impl BrainFlowApi {
         )?;
         Ok(rate)
     }
-
     fn num_rows(&self, board_id: c_int) -> Result<c_int> {
         let mut rows: c_int = 0;
         Self::check(
@@ -143,7 +145,6 @@ impl BrainFlowApi {
         )?;
         Ok(rows)
     }
-
     fn eeg_channels(&self, board_id: c_int, max_channels: usize) -> Result<Vec<c_int>> {
         let mut out_len: c_int = 0;
         let mut buf = vec![0 as c_int; max_channels.max(32)];
@@ -161,7 +162,6 @@ impl BrainFlowApi {
         buf.truncate(out_len as usize);
         Ok(buf)
     }
-
     fn current_board_data(
         &self,
         board_id: c_int,
@@ -196,7 +196,6 @@ impl BrainFlowApi {
         Ok(samples)
     }
 }
-
 /// BrainFlow-backed session for OpenBCI Cyton + Daisy via USB dongle.
 ///
 /// Compared to the previous raw-serial approach, this uses BrainFlow's
@@ -212,23 +211,18 @@ pub struct OpenBciSession {
     is_streaming: bool,
     released: bool,
 }
-
 impl OpenBciSession {
     /// Connects and prepares a BrainFlow session for Cyton+Daisy (board id 2).
     pub fn connect(port_name: &str) -> Result<Self> {
         let api = BrainFlowApi::instance()?;
-
         let params = BrainFlowInputParams::for_serial(port_name);
         let json = serde_json::to_string(&params)?;
         let input_json =
             CString::new(json).context("failed to encode BrainFlow input params to C string")?;
-
         api.prepare(BOARD_ID_CYTON_DAISY, &input_json)?;
-
         let sample_rate_hz = api.sampling_rate(BOARD_ID_CYTON_DAISY)? as f32;
         let num_rows = api.num_rows(BOARD_ID_CYTON_DAISY)? as usize;
         let eeg_channels = api.eeg_channels(BOARD_ID_CYTON_DAISY, num_rows)?;
-
         Ok(Self {
             port_name: port_name.to_string(),
             api,
@@ -240,27 +234,25 @@ impl OpenBciSession {
             released: false,
         })
     }
-
     pub fn port_name(&self) -> &str {
         &self.port_name
     }
-
     pub fn sample_rate_hz(&self) -> f32 {
         self.sample_rate_hz
     }
-
     pub fn start_stream(&mut self) -> Result<()> {
         if !self.is_streaming {
-            self.api.start_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
+            self.api
+                .start_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
             self.is_streaming = true;
         }
         Ok(())
     }
-
     pub fn stop_stream(&mut self) -> Result<()> {
         if !self.released {
             if self.is_streaming {
-                self.api.stop_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
+                self.api
+                    .stop_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
                 self.is_streaming = false;
             }
             self.api.release(BOARD_ID_CYTON_DAISY, &self.input_json)?;
@@ -268,7 +260,6 @@ impl OpenBciSession {
         }
         Ok(())
     }
-
     /// Pulls the most recent sample for all EEG channels (if any).
     pub fn next_sample(&mut self) -> Result<Option<Vec<f64>>> {
         // We request up to 5 samples to reduce FFI overhead; only the latest is used.
@@ -281,7 +272,6 @@ impl OpenBciSession {
             max_samples,
             &mut buf,
         )?;
-
         if available == 0 {
             return Ok(None);
         }
@@ -303,7 +293,6 @@ impl OpenBciSession {
         }
     }
 }
-
 impl Drop for OpenBciSession {
     fn drop(&mut self) {
         let _ = self.stop_stream();

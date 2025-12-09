@@ -2,24 +2,20 @@
 use crate::types::GamepadState;
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Rounding, Shape, Stroke, Vec2};
-
 pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
     let body_color = Color32::from_rgb(50, 50, 55);
     let outline_color = Color32::from_rgb(80, 80, 85);
     let btn_base_color = Color32::from_rgb(70, 70, 75);
     let text_color = Color32::from_rgb(180, 180, 180);
-
     let width = 280.0;
     let height_front = 180.0;
     let height_back = 60.0;
     let spacing = 15.0;
     let total_height = height_front + height_back + spacing;
-
     let (response, painter) =
         ui.allocate_painter(Vec2::new(width, total_height), egui::Sense::hover());
     let rect = response.rect;
     let top_left = rect.min;
-
     // 1. Top View
     let top_rect = Rect::from_min_size(top_left, Vec2::new(width, height_back));
     painter.text(
@@ -29,7 +25,6 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
         egui::FontId::proportional(10.0),
         text_color,
     );
-
     let top_body_rect = top_rect
         .shrink2(Vec2::new(20.0, 10.0))
         .translate(Vec2::new(0.0, 5.0));
@@ -39,11 +34,9 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
         Rounding::same(8.0),
         Stroke::new(1.5, outline_color),
     );
-
     let trigger_size = Vec2::new(45.0, 20.0);
     let lt_pos = top_body_rect.left_center() + Vec2::new(trigger_size.x / 2.0 - 5.0, 0.0);
     let rt_pos = top_body_rect.right_center() - Vec2::new(trigger_size.x / 2.0 - 5.0, 0.0);
-
     let draw_trigger = |center: Pos2, active: bool, label: &str| {
         let r = Rect::from_center_size(center, trigger_size);
         let fill = if active {
@@ -63,11 +56,9 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
     };
     draw_trigger(lt_pos, gamepad.lt, "LT");
     draw_trigger(rt_pos, gamepad.rt, "RT");
-
     let bumper_size = Vec2::new(40.0, 14.0);
     let lb_pos = lt_pos + Vec2::new(trigger_size.x / 2.0 + bumper_size.x / 2.0 + 2.0, 0.0);
     let rb_pos = rt_pos - Vec2::new(trigger_size.x / 2.0 + bumper_size.x / 2.0 + 2.0, 0.0);
-
     let draw_bumper = |center: Pos2, active: bool, label: &str| {
         let r = Rect::from_center_size(center, bumper_size);
         let fill = if active {
@@ -87,7 +78,6 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
     };
     draw_bumper(lb_pos, gamepad.lb, "LB");
     draw_bumper(rb_pos, gamepad.rb, "RB");
-
     // 2. Face View
     let face_rect = Rect::from_min_size(
         top_left + Vec2::new(0.0, height_back + spacing),
@@ -101,7 +91,6 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
         text_color,
     );
     let fc = face_rect.center();
-
     let body_points = vec![
         fc + Vec2::new(-70.0, -40.0),
         fc + Vec2::new(70.0, -40.0),
@@ -115,7 +104,6 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
         body_color,
         Stroke::new(1.5, outline_color),
     ));
-
     let draw_stick = |c: Pos2, x: f32, y: f32, lbl: &str| {
         painter.circle_filled(c, 22.0, btn_base_color);
         painter.circle_stroke(c, 22.0, Stroke::new(1.0, outline_color));
@@ -138,7 +126,6 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
     };
     draw_stick(fc + Vec2::new(-65.0, -10.0), gamepad.lx, gamepad.ly, "LS");
     draw_stick(fc + Vec2::new(35.0, 30.0), gamepad.rx, gamepad.ry, "RS");
-
     let dpad_c = fc + Vec2::new(-35.0, 30.0);
     let d_sz = 10.0;
     let draw_dpad_arm = |offset: Vec2, active: bool| {
@@ -156,7 +143,6 @@ pub fn draw_xbox_controller(ui: &mut egui::Ui, gamepad: &GamepadState) {
     draw_dpad_arm(Vec2::new(0.0, d_sz), gamepad.dpad_down);
     draw_dpad_arm(Vec2::new(-d_sz, 0.0), gamepad.dpad_left);
     draw_dpad_arm(Vec2::new(d_sz, 0.0), gamepad.dpad_right);
-
     let btn_c = fc + Vec2::new(65.0, -30.0);
     let b_rad = 11.0;
     let b_gap = 20.0;

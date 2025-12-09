@@ -1,5 +1,4 @@
 use thiserror::Error;
-
 #[derive(Debug, Error)]
 pub enum ModelizeError {
     #[error("sample rate must be greater than zero")]
@@ -13,7 +12,6 @@ pub enum ModelizeError {
     #[error("failed to render plot: {0}")]
     Plot(String),
 }
-
 impl<E: std::error::Error + Send + Sync + 'static> From<plotters::drawing::DrawingAreaErrorKind<E>>
     for ModelizeError
 {
@@ -21,7 +19,6 @@ impl<E: std::error::Error + Send + Sync + 'static> From<plotters::drawing::Drawi
         ModelizeError::Plot(format!("{value:?}"))
     }
 }
-
 impl From<image::ImageError> for ModelizeError {
     fn from(value: image::ImageError) -> Self {
         ModelizeError::Plot(value.to_string())
