@@ -1,4 +1,5 @@
 // src/engine.rs
+use crate::drivers::fft::SpectrumBuilder;
 use crate::drivers::{SignalBatch, SignalBuffer};
 use crate::openbci::OpenBciSession;
 use crate::recorder::DataRecorder;
@@ -7,28 +8,25 @@ use crate::vjoy::VJoyClient;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-
+use rand::Rng;
 /// 🧠 神经意图解码器 (接收端：检查特征)
 fn process_neural_intent(
     data: &[f64],
     threshold: f64,
     calib_mode: bool,
+    calib_is_action: bool,
     calib_max: &mut f64,
     start_time: Instant,
     tx: &Sender<BciMessage>,
 ) -> GamepadState {
     let mut gp = GamepadState::default();
-
     let is_active =
         |idx: usize| -> bool { data.get(idx).map(|&v| v.abs() > threshold).unwrap_or(false) };
-
     // 辅助：检查组合模式
     let match_pattern = |indices: &[usize]| -> bool { indices.iter().all(|&i| is_active(i)) };
-
     // =========================================================================
     // 1. 解码表 (Decoder) - 必须与下面的生成表 (Encoder) 完全一致
     // =========================================================================
-
     // --- 左摇杆 (WASD) ---
     if match_pattern(&[0, 4, 8]) {
         gp.ly += 1.0;
@@ -42,7 +40,6 @@ fn process_neural_intent(
     if match_pattern(&[3, 7, 11]) {
         gp.lx += 1.0;
     } // D
-
     // --- 动作键 (Space/ZXC) ---
     // 修复：这里定义了每个键需要的通道组合
     if match_pattern(&[0, 1, 2]) {
@@ -57,14 +54,12 @@ fn process_neural_intent(
     if match_pattern(&[9, 10, 11]) {
         gp.y = true;
     } // C
-
     // --- 右摇杆 (IJKL) ---
     // 修复：使用独特的跨通道组合
     let rs_up = match_pattern(&[12, 0]);
     let rs_down = match_pattern(&[13, 1]);
     let rs_left = match_pattern(&[14, 2]);
     let rs_right = match_pattern(&[15, 3]);
-
     if rs_up {
         gp.ry += 1.0;
     } // I (Up)
@@ -77,7 +72,6 @@ fn process_neural_intent(
     if rs_right {
         gp.rx += 1.0;
     } // L (Right)
-
     // --- 肩键/扳机 (QEUO) ---
     if match_pattern(&[0, 15]) && !(rs_up || rs_right) {
         gp.lb = true;
@@ -91,7 +85,6 @@ fn process_neural_intent(
     if match_pattern(&[3, 12]) && !(rs_up || rs_right) {
         gp.rt = true;
     } // E
-
     // --- D-Pad (方向键) ---
     if match_pattern(&[4, 12]) {
         gp.dpad_up = true;
@@ -105,7 +98,6 @@ fn process_neural_intent(
     if match_pattern(&[7, 15]) {
         gp.dpad_right = true;
     }
-
     // 2. 校准逻辑
     if calib_mode {
         let max_s = data.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
@@ -114,19 +106,20 @@ fn process_neural_intent(
         }
         if start_time.elapsed().as_secs() >= 3 {
             tx.send(BciMessage::CalibrationResult((), *calib_max)).ok();
+            let label = if calib_is_action { "Action" } else { "Rest" };
+            tx.send(BciMessage::Log(format!("Calib {label} captured")))
+                .ok();
         }
     }
-
     gp
 }
-
 pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
     thread::spawn(move || {
         tx.send(BciMessage::Log(
             "⚙️ Engine V13.1 (Synced Logic).".to_owned(),
         ))
         .ok();
-
+        let mut rng = rand::thread_rng();
         let mut joystick = match VJoyClient::new(1) {
             Ok(j) => {
                 tx.send(BciMessage::VJoyStatus(true)).ok();
@@ -139,29 +132,24 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
         };
         let mut last_vjoy_attempt = Instant::now();
         let mut vjoy_logged_failure = joystick.is_none();
-
         let mut recorder = DataRecorder::new();
         let mut openbci: Option<OpenBciSession> = None;
-
         let mut signal_buffer: Option<SignalBuffer> = None;
         let mut channel_labels: Vec<String> = Vec::new();
         let mut current_sample_rate_hz: f32 = 250.0;
-
         let mut current_mode = ConnectionMode::Simulation;
         let mut is_active = false;
         let mut is_streaming = false;
         let mut threshold = 200.0;
-
         let mut sim_phase = 0.0;
         let mut current_sim_input = SimInputIntent::default();
-
         let mut calib_mode = false;
         let mut calib_max_val = 0.0;
+        let mut calib_is_action = false;
         let mut calib_start_time = Instant::now();
         let mut inject_artifact_frames = 0;
-
         let mut channel_data = vec![0.0f64; 16];
-
+        let mut last_pred_emit = Instant::now();
         loop {
             // 1. 消息处理
             for _ in 0..10 {
@@ -179,11 +167,15 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                                         Ok(session) => {
                                             current_sample_rate_hz = session.sample_rate_hz();
                                             openbci = Some(session);
+                                            let port_name = openbci
+                                                .as_ref()
+                                                .map(|s| s.port_name().to_owned())
+                                                .unwrap_or_else(|| port.clone());
                                             is_active = true;
                                             tx.send(BciMessage::Status(true)).ok();
                                             tx.send(BciMessage::Log(format!(
                                                 "✅ OpenBCI Connected on {} ({} Hz)",
-                                                port, current_sample_rate_hz
+                                                port_name, current_sample_rate_hz
                                             )))
                                             .ok();
                                         }
@@ -246,10 +238,14 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                                 .ok();
                         }
                         GuiCommand::SetThreshold(v) => threshold = v,
-                        GuiCommand::StartCalibration(_) => {
+                        GuiCommand::StartCalibration(is_action) => {
                             calib_mode = true;
                             calib_max_val = 0.0;
+                            calib_is_action = is_action;
                             calib_start_time = Instant::now();
+                            let label = if is_action { "Action" } else { "Rest" };
+                            tx.send(BciMessage::Log(format!("Calibrating: {label}")))
+                                .ok();
                         }
                         GuiCommand::UpdateSimInput(input) => current_sim_input = input,
                         GuiCommand::StartRecording(label) => {
@@ -269,7 +265,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     break;
                 }
             }
-
             if is_streaming {
                 channel_data.fill(0.0);
                 // === 2. 信号生成 (生成端：必须生成解码器需要的组合) ===
@@ -279,9 +274,7 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     for (i, v) in channel_data.iter_mut().enumerate() {
                         *v = (sim_phase * (i as f64 * 0.1 + 1.0)).sin() * 2.0;
                     }
-
                     let amp = 1000.0;
-
                     // 左摇杆 (WASD) -> [0,4,8], [1,5,9], [2,6,10], [3,7,11]
                     if current_sim_input.w {
                         channel_data[0] += amp;
@@ -303,7 +296,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         channel_data[7] += amp;
                         channel_data[11] += amp;
                     }
-
                     // 动作键 (Space/ZXC) -> [0,1,2], [3,4,5], [6,7,8], [9,10,11]
                     // 修复：严格对齐解码器要求的通道
                     if current_sim_input.space {
@@ -326,7 +318,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         channel_data[10] += amp;
                         channel_data[11] += amp;
                     } // Y
-
                     // 右摇杆 (IJKL) -> [12,0], [13,1], [14,2], [15,3]
                     // 修复：注入对应的跨半球信号
                     if current_sim_input.up {
@@ -345,7 +336,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         channel_data[15] += amp;
                         channel_data[3] += amp;
                     } // L
-
                     // 肩键 (QEUO) -> [1,14], [3,12], [0,15], [2,13]
                     // 修复：注入对应的信号
                     if current_sim_input.u {
@@ -364,7 +354,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         channel_data[3] += amp;
                         channel_data[12] += amp;
                     } // RT (E)
-
                     // 方向键 (Arrows) -> [4,12], [5,13], [6,14], [7,15]
                     // 修复：注入对应的信号
                     if current_sim_input.arrow_up {
@@ -383,7 +372,16 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         channel_data[7] += amp;
                         channel_data[15] += amp;
                     }
-
+                    if current_sim_input.key_1 {
+                        channel_data[0] += amp * 0.5;
+                        channel_data[8] += amp * 0.5;
+                        inject_artifact_frames = inject_artifact_frames.max(2);
+                    }
+                    if current_sim_input.key_2 {
+                        channel_data[1] += amp * 0.5;
+                        channel_data[9] += amp * 0.5;
+                        inject_artifact_frames = inject_artifact_frames.max(4);
+                    }
                     if inject_artifact_frames > 0 {
                         // 模拟惊吓：全脑激活
                         for v in channel_data.iter_mut() {
@@ -391,7 +389,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         }
                         inject_artifact_frames -= 1;
                     }
-
                     // 更短的忙等待 + 更长的休眠，降低 CPU 抢占
                     thread::sleep(Duration::from_millis(8));
                 } else if let Some(session) = openbci.as_mut() {
@@ -411,11 +408,9 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         }
                     }
                 }
-
                 if recorder.is_recording() {
                     recorder.write_record(&channel_data);
                 }
-
                 // === 驱动层：更新滚动缓冲并推送给 GUI ===
                 const DEFAULT_SAMPLE_RATE_HZ: f32 = 250.0;
                 const HISTORY_SECONDS: f32 = 60.0;
@@ -424,7 +419,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                 } else {
                     DEFAULT_SAMPLE_RATE_HZ
                 };
-
                 if signal_buffer.is_none() || channel_labels.len() != channel_data.len() {
                     channel_labels = (0..channel_data.len())
                         .map(|i| format!("Ch{}", i + 1))
@@ -434,14 +428,23 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         sample_rate_hz,
                         HISTORY_SECONDS,
                     ) {
-                        Ok(buf) => signal_buffer = Some(buf),
+                        Ok(buf) => {
+                            let sr_dbg = buf.sample_rate_hz();
+                            let ch_dbg = buf.channel_labels().len();
+                            let _ = buf.full_frame();
+                            tx.send(BciMessage::Log(format!(
+                                "Buffer ready: {:.1} Hz, {} channels",
+                                sr_dbg, ch_dbg
+                            )))
+                            .ok();
+                            signal_buffer = Some(buf);
+                        }
                         Err(e) => {
                             tx.send(BciMessage::Log(format!("Buffer init failed: {e}")))
                                 .ok();
                         }
                     }
                 }
-
                 if let Some(buf) = signal_buffer.as_mut() {
                     let samples: Vec<Vec<f32>> =
                         channel_data.iter().map(|v| vec![*v as f32]).collect();
@@ -451,10 +454,33 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         samples,
                         channel_labels: channel_labels.clone(),
                     };
+                    let _ = batch.started_at.elapsed();
+                    let _ = batch.samples_per_channel();
+                    let _ = batch.duration();
                     match buf.push_batch(&batch) {
                         Ok(()) => {
                             let frame = buf.snapshot(HISTORY_SECONDS);
-                            tx.send(BciMessage::DataFrame(frame)).ok();
+                            tx.send(BciMessage::DataFrame(frame.clone())).ok();
+                            let fft_builder = SpectrumBuilder::with_size(256);
+                            let spectrum = fft_builder.compute(&frame);
+                            tx.send(BciMessage::Spectrum(spectrum)).ok();
+                            // stub: emit random model prediction when streaming
+                            if is_streaming && last_pred_emit.elapsed() > Duration::from_millis(500)
+                            {
+                                let mut vals = [0.0f32; 4];
+                                let mut sum = 0.0f32;
+                                for v in vals.iter_mut() {
+                                    *v = rng.gen_range(0.01..1.0);
+                                    sum += *v;
+                                }
+                                if sum > 0.0 {
+                                    for v in vals.iter_mut() {
+                                        *v /= sum;
+                                    }
+                                }
+                                tx.send(BciMessage::ModelPrediction(vals.to_vec())).ok();
+                                last_pred_emit = Instant::now();
+                            }
                         }
                         Err(e) => {
                             tx.send(BciMessage::Log(format!("Buffer push failed: {e}")))
@@ -462,17 +488,16 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         }
                     }
                 }
-
                 // === 3. 解码 (这里会调用上面对齐过的逻辑) ===
                 let gp = process_neural_intent(
                     &channel_data,
                     threshold,
                     calib_mode,
+                    calib_is_action,
                     &mut calib_max_val,
                     calib_start_time,
                     &tx,
                 );
-
                 // 4. 执行
                 if let Some(joy) = &mut joystick {
                     joy.set_button(1, gp.a);
@@ -487,7 +512,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     joy.set_button(10, gp.dpad_down);
                     joy.set_button(11, gp.dpad_left);
                     joy.set_button(12, gp.dpad_right);
-
                     let to_axis = |v: f32| (16384.0 + v * 16000.0) as i32;
                     joy.set_axis(0x30, to_axis(gp.lx));
                     joy.set_axis(0x31, to_axis(gp.ly));
@@ -501,22 +525,18 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                             joystick = Some(j);
                             vjoy_logged_failure = false;
                             tx.send(BciMessage::VJoyStatus(true)).ok();
-                            tx.send(BciMessage::Log("vJoy reconnected".to_owned()))
-                                .ok();
+                            tx.send(BciMessage::Log("vJoy reconnected".to_owned())).ok();
                         }
                         Err(e) => {
                             if !vjoy_logged_failure {
-                                tx.send(BciMessage::Log(format!(
-                                    "vJoy connect failed: {e}"
-                                )))
-                                .ok();
+                                tx.send(BciMessage::Log(format!("vJoy connect failed: {e}")))
+                                    .ok();
                                 vjoy_logged_failure = true;
                             }
                             tx.send(BciMessage::VJoyStatus(false)).ok();
                         }
                     }
                 }
-
                 if sim_phase as i32 % 2 == 0 {
                     tx.send(BciMessage::GamepadUpdate(gp)).ok();
                 }
@@ -529,15 +549,12 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                             joystick = Some(j);
                             vjoy_logged_failure = false;
                             tx.send(BciMessage::VJoyStatus(true)).ok();
-                            tx.send(BciMessage::Log("vJoy connected".to_owned()))
-                                .ok();
+                            tx.send(BciMessage::Log("vJoy connected".to_owned())).ok();
                         }
                         Err(e) => {
                             if !vjoy_logged_failure {
-                                tx.send(BciMessage::Log(format!(
-                                    "vJoy connect failed: {e}"
-                                )))
-                                .ok();
+                                tx.send(BciMessage::Log(format!("vJoy connect failed: {e}")))
+                                    .ok();
                                 vjoy_logged_failure = true;
                             }
                             tx.send(BciMessage::VJoyStatus(false)).ok();

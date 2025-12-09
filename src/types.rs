@@ -1,13 +1,10 @@
 use crate::drivers::{FrequencySpectrum, TimeSeriesFrame};
-
 // src/types.rs
-
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ConnectionMode {
     Simulation,
     Hardware,
 }
-
 #[derive(Clone, Debug)]
 pub enum GuiCommand {
     // === 修改：Connect 现在接收 (模式, 端口名) ===
@@ -22,7 +19,6 @@ pub enum GuiCommand {
     StopRecording,
     InjectArtifact,
 }
-
 #[derive(Clone, Debug)]
 pub enum BciMessage {
     Log(String),
@@ -33,8 +29,8 @@ pub enum BciMessage {
     GamepadUpdate(GamepadState),
     RecordingStatus(bool),
     CalibrationResult((), f64),
+    ModelPrediction(Vec<f32>),
 }
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GamepadState {
     pub lx: f32,
@@ -54,7 +50,6 @@ pub struct GamepadState {
     pub dpad_left: bool,
     pub dpad_right: bool,
 }
-
 #[derive(Default, Clone, Copy, Debug)]
 pub struct SimInputIntent {
     pub w: bool,
