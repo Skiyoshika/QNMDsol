@@ -4,7 +4,7 @@
 ![Rust](https://img.shields.io/badge/Built_with-Rust-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows-blue?style=flat-square)
 ![Hardware](https://img.shields.io/badge/Hardware-OpenBCI-purple?style=flat-square)
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+![License](https://img.shields.io/badge/License-AGPLv3-blue?style=flat-square)
 
 **QNMDsol** is a high-performance Brain-Computer Interface (BCI) game control system built with **Rust**. It is designed to control demanding "Souls-like" action games (e.g., *Elden Ring*, *Code Vein*) using real-time EEG/EMG signals.
 
@@ -130,7 +130,7 @@ The developer is not responsible for emotional damage caused by in-game deaths (
 ---
 
 ## 📄 License
-MIT License
+GNU AGPLv3 (see `LICENSE`).
 
 Made with ❤️ and 🧠 by Independent Developer.
 
