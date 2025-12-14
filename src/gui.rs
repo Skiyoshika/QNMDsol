@@ -934,11 +934,8 @@ impl QnmdSolApp {
             if self.is_calibrating {
                 ui.label(self.text(UiText::Recording));
             }
-            ui.label(format!(
-                "{} {:.1}",
-                self.text(UiText::Threshold),
-                self.trigger_threshold
-            ));
+            ui.label(format!("Rest µ-power: {:.3}", self.calib_rest_max));
+            ui.label(format!("Imagery µ-power: {:.3}", self.calib_act_max));
         } else {
             ui.label(self.text(UiText::ConnectStreamFirst));
         }
@@ -1235,7 +1232,7 @@ impl eframe::App for QnmdSolApp {
         let mut msg_count = 0;
         while let Ok(msg) = self.rx.try_recv() {
             msg_count += 1;
-            if msg_count > 20 {
+            if msg_count > 2000 {
                 match msg {
                     BciMessage::GamepadUpdate(gp) => {
                         self.gamepad_target = gp;
@@ -1333,25 +1330,18 @@ impl eframe::App for QnmdSolApp {
                         if self.calib_rest_max == 0.0 {
                             self.calib_rest_max = max;
                             let msg = match self.language {
-                                Language::English => format!("Base: {:.1}", max),
+                                Language::English => format!("Rest µ-power: {:.3}", max),
                                 Language::Chinese => format!("基线：{:.1}", max),
                             };
                             self.log(&msg);
                         } else {
                             self.calib_act_max = max;
                             let msg = match self.language {
-                                Language::English => format!("Act: {:.1}", max),
+                                Language::English => format!("Imagery µ-power: {:.3}", max),
                                 Language::Chinese => format!("动作：{:.1}", max),
                             };
                             self.log(&msg);
-                            let new = (self.calib_rest_max + self.calib_act_max) * 0.6;
-                            self.trigger_threshold = new;
-                            self.tx_cmd.send(GuiCommand::SetThreshold(new)).unwrap();
-                            let thresh_msg = match self.language {
-                                Language::English => format!("Threshold: {:.1}", new),
-                                Language::Chinese => format!("阈值：{:.1}", new),
-                            };
-                            self.log(&thresh_msg);
+                            // Hardware mode now uses pure EEG µ-band power mapping for forward axis.
                         }
                     }
                 }
