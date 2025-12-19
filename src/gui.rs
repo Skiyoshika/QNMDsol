@@ -118,6 +118,7 @@ pub struct QnmdSolApp {
     mapping_helper_auto: bool,
     mapping_overlay_open: bool,
     mapping_overlay_topmost: bool,
+    status_panel_open: bool,
 }
 impl Default for QnmdSolApp {
     fn default() -> Self {
@@ -212,7 +213,7 @@ impl Default for QnmdSolApp {
             available_ports: ports,
             selected_port: default_port,
             control_panel_open: true,
-            control_panel_width: 320.0,
+            control_panel_width: 280.0,
             model_path: "model/neurogpt.onnx".to_string(),
             model_status: None,
             model_error: None,
@@ -229,6 +230,7 @@ impl Default for QnmdSolApp {
             mapping_helper_auto: false,
             mapping_overlay_open: false,
             mapping_overlay_topmost: false,
+            status_panel_open: true,
         };
         // Restore overlay window preferences from last run (in-process lifetime).
         app.mapping_overlay_open = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed);
@@ -930,102 +932,103 @@ impl QnmdSolApp {
             let cutoff_label = self.text(UiText::CutoffHz);
             let low_hz_label = self.text(UiText::LowHz);
             let high_hz_label = self.text(UiText::HighHz);
-            ui.label(filters_label);
-            changed |= ui
-                .checkbox(&mut self.wave_highpass, hp_label)
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_highpass,
-                    egui::Slider::new(&mut self.wave_highpass_hz, 0.1..=30.0)
-                        .show_value(true)
-                        .text(cutoff_label),
-                )
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_highpass,
-                    egui::Slider::new(&mut self.wave_highpass_q, 0.1..=20.0)
-                        .show_value(true)
-                        .text("Q"),
-                )
-                .changed();
+            egui::CollapsingHeader::new(filters_label)
+                .default_open(false)
+                .show(ui, |ui| {
+                    let mut local_changed = false;
+                    local_changed |= ui.checkbox(&mut self.wave_highpass, hp_label).changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_highpass,
+                            egui::Slider::new(&mut self.wave_highpass_hz, 0.1..=30.0)
+                                .show_value(true)
+                                .text(cutoff_label),
+                        )
+                        .changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_highpass,
+                            egui::Slider::new(&mut self.wave_highpass_q, 0.1..=20.0)
+                                .show_value(true)
+                                .text("Q"),
+                        )
+                        .changed();
 
-            changed |= ui
-                .checkbox(&mut self.wave_lowpass, lp_label)
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_lowpass,
-                    egui::Slider::new(&mut self.wave_lowpass_hz, 1.0..=120.0)
-                        .show_value(true)
-                        .text(cutoff_label),
-                )
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_lowpass,
-                    egui::Slider::new(&mut self.wave_lowpass_q, 0.1..=20.0)
-                        .show_value(true)
-                        .text("Q"),
-                )
-                .changed();
+                    ui.separator();
+                    local_changed |= ui.checkbox(&mut self.wave_lowpass, lp_label).changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_lowpass,
+                            egui::Slider::new(&mut self.wave_lowpass_hz, 1.0..=120.0)
+                                .show_value(true)
+                                .text(cutoff_label),
+                        )
+                        .changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_lowpass,
+                            egui::Slider::new(&mut self.wave_lowpass_q, 0.1..=20.0)
+                                .show_value(true)
+                                .text("Q"),
+                        )
+                        .changed();
 
-            changed |= ui
-                .checkbox(&mut self.wave_bandpass, bp_label)
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_bandpass,
-                    egui::Slider::new(&mut self.wave_bandpass_low_hz, 0.1..=80.0)
-                        .show_value(true)
-                        .text(low_hz_label),
-                )
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_bandpass,
-                    egui::Slider::new(&mut self.wave_bandpass_high_hz, 0.1..=120.0)
-                        .show_value(true)
-                        .text(high_hz_label),
-                )
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_bandpass,
-                    egui::Slider::new(&mut self.wave_bandpass_q, 0.1..=20.0)
-                        .show_value(true)
-                        .text("Q"),
-                )
-                .changed();
+                    ui.separator();
+                    local_changed |= ui.checkbox(&mut self.wave_bandpass, bp_label).changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_bandpass,
+                            egui::Slider::new(&mut self.wave_bandpass_low_hz, 0.1..=80.0)
+                                .show_value(true)
+                                .text(low_hz_label),
+                        )
+                        .changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_bandpass,
+                            egui::Slider::new(&mut self.wave_bandpass_high_hz, 0.1..=120.0)
+                                .show_value(true)
+                                .text(high_hz_label),
+                        )
+                        .changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_bandpass,
+                            egui::Slider::new(&mut self.wave_bandpass_q, 0.1..=20.0)
+                                .show_value(true)
+                                .text("Q"),
+                        )
+                        .changed();
 
-            changed |= ui
-                .checkbox(&mut self.wave_bandstop, bs_label)
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_bandstop,
-                    egui::Slider::new(&mut self.wave_bandstop_low_hz, 0.1..=120.0)
-                        .show_value(true)
-                        .text(low_hz_label),
-                )
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_bandstop,
-                    egui::Slider::new(&mut self.wave_bandstop_high_hz, 0.1..=120.0)
-                        .show_value(true)
-                        .text(high_hz_label),
-                )
-                .changed();
-            changed |= ui
-                .add_enabled(
-                    self.wave_bandstop,
-                    egui::Slider::new(&mut self.wave_bandstop_q, 0.1..=50.0)
-                        .show_value(true)
-                        .text("Q"),
-                )
-                .changed();
+                    ui.separator();
+                    local_changed |= ui.checkbox(&mut self.wave_bandstop, bs_label).changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_bandstop,
+                            egui::Slider::new(&mut self.wave_bandstop_low_hz, 0.1..=120.0)
+                                .show_value(true)
+                                .text(low_hz_label),
+                        )
+                        .changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_bandstop,
+                            egui::Slider::new(&mut self.wave_bandstop_high_hz, 0.1..=120.0)
+                                .show_value(true)
+                                .text(high_hz_label),
+                        )
+                        .changed();
+                    local_changed |= ui
+                        .add_enabled(
+                            self.wave_bandstop,
+                            egui::Slider::new(&mut self.wave_bandstop_q, 0.1..=50.0)
+                                .show_value(true)
+                                .text("Q"),
+                        )
+                        .changed();
+
+                    changed |= local_changed;
+                });
             changed |= ui
                 .checkbox(&mut self.wave_show_stats, stats_label)
                 .changed();
@@ -1963,6 +1966,9 @@ impl eframe::App for QnmdSolApp {
                 if ui.button(toggle_label).clicked() {
                     self.control_panel_open = !self.control_panel_open;
                 }
+                if ui.button(if self.status_panel_open { "Hide Status" } else { "Show Status" }).clicked() {
+                    self.status_panel_open = !self.status_panel_open;
+                }
                 ui.separator();
                 ui.label(self.text(UiText::Title));
                 ui.label(
@@ -2565,11 +2571,13 @@ impl eframe::App for QnmdSolApp {
                     });
                 });
         }
-        egui::SidePanel::right("status_panel")
-            .resizable(true)
-            .min_width(260.0)
-            .default_width(280.0)
-            .show(ctx, |ui| {
+        if self.status_panel_open {
+            egui::SidePanel::right("status_panel")
+                .resizable(true)
+                .min_width(200.0)
+                .default_width(240.0)
+                .width_range(200.0..=420.0)
+                .show(ctx, |ui| {
                 if let Some(label) = &self.progress_label {
                     ui.label(self.text(UiText::Loading));
                     ui.add(
@@ -2659,7 +2667,8 @@ impl eframe::App for QnmdSolApp {
                             ui.monospace(m);
                         }
                     });
-            });
+                });
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 for (label, tab) in [
