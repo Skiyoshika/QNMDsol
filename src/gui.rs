@@ -119,6 +119,7 @@ pub struct QnmdSolApp {
     mapping_helper_auto: bool,
     mapping_overlay_open: bool,
     mapping_overlay_topmost: bool,
+    mapping_overlay_alive_last: bool,
     status_panel_open: bool,
     wave_toolbar_open: bool,
 }
@@ -232,6 +233,7 @@ impl Default for QnmdSolApp {
             mapping_helper_auto: false,
             mapping_overlay_open: false,
             mapping_overlay_topmost: false,
+            mapping_overlay_alive_last: false,
             status_panel_open: true,
             wave_toolbar_open: true,
         };
@@ -247,11 +249,8 @@ impl QnmdSolApp {
         // Use a separate native window so Steam remains visible (draggable overlay).
         let viewport_id = egui::ViewportId::from_hash_of("qnmdsol_binding_helper");
 
-        // Sync from last known global state (child viewport can close itself; parent must observe that).
-        // Avoids a race where OS close triggers `close_requested` in the child callback but the parent
-        // keeps driving the viewport for extra frames (appearing as a black window).
-        self.mapping_overlay_open = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed) && self.mapping_overlay_open;
-        self.mapping_overlay_topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
+        // NOTE: do not overwrite `mapping_overlay_open` here; this function is called after the checkbox UI,
+        // and forcing a value here can cancel the user's click in the same frame.
 
         // Only show in Simulation mode; hide otherwise.
         if self.connection_mode != ConnectionMode::Simulation {
@@ -2667,7 +2666,11 @@ impl eframe::App for QnmdSolApp {
         // Floating overlay for Steam binding (kept above Steam when topmost is enabled).
         self.show_mapping_overlay(ctx);
         // If the user closed the helper viewport via the OS close button, reflect it in the main checkbox.
-        self.mapping_overlay_open = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed);
+        let overlay_alive = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed);
+        if self.mapping_overlay_alive_last && !overlay_alive {
+            self.mapping_overlay_open = false;
+        }
+        self.mapping_overlay_alive_last = overlay_alive;
         self.mapping_overlay_topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
     }
 }
