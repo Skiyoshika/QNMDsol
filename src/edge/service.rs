@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -8,6 +9,7 @@ use serde::Serialize;
 use tiny_http::{Header, Request, Response, Server};
 
 use crate::edge::config::EdgeConfig;
+use crate::edge::recorder::{EdgeRecorder, RecordingMetadata};
 use crate::openbci::OpenBciSession;
 use crate::ssvep::{SsvepConfig, SsvepDecision, SsvepDecoder};
 
@@ -56,6 +58,7 @@ struct Runtime {
     session: Mutex<Option<OpenBciSession>>,
     stop_flag: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    recorder: Arc<Mutex<Option<EdgeRecorder>>>,
 }
 
 impl Runtime {
@@ -66,6 +69,7 @@ impl Runtime {
             session: Mutex::new(None),
             stop_flag: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(None),
+            recorder: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -125,7 +129,7 @@ fn push_sample(state: &Arc<Mutex<EdgeState>>, sample: &[f32]) {
     }
 }
 
-fn run_decoder(state: &Arc<Mutex<EdgeState>>, decoder: &SsvepDecoder) {
+fn run_decoder(state: &Arc<Mutex<EdgeState>>, decoder: &SsvepDecoder) -> Option<SsvepDecision> {
     let snapshot: Vec<Vec<f32>> = {
         let s = state.lock().unwrap();
         let window = (decoder.config().sample_rate_hz * decoder.config().window_seconds) as usize;
@@ -139,11 +143,95 @@ fn run_decoder(state: &Arc<Mutex<EdgeState>>, decoder: &SsvepDecoder) {
             .collect()
     };
     if snapshot.iter().any(|c| c.len() < 32) {
-        return;
+        return None;
     }
     let decision = decoder.decide(&snapshot);
     let mut s = state.lock().unwrap();
-    s.latest_decision = Some(decision);
+    s.latest_decision = Some(decision.clone());
+    Some(decision)
+}
+
+fn record_sample(
+    recorder: &Arc<Mutex<Option<EdgeRecorder>>>,
+    t_sec: f32,
+    channels: &[f32],
+) {
+    let mut guard = recorder.lock().unwrap();
+    if let Some(rec) = guard.as_mut() {
+        let _ = rec.write_sample(t_sec, channels);
+    }
+}
+
+fn record_decision(
+    recorder: &Arc<Mutex<Option<EdgeRecorder>>>,
+    t_sec: f32,
+    decision: &SsvepDecision,
+) {
+    let mut guard = recorder.lock().unwrap();
+    if let Some(rec) = guard.as_mut() {
+        let _ = rec.write_decision(t_sec, decision);
+    }
+}
+
+fn handle_record_start(rt: &Arc<Runtime>) -> Response<std::io::Cursor<Vec<u8>>> {
+    {
+        let guard = rt.recorder.lock().unwrap();
+        if guard.is_some() {
+            return error_response(409, "recording already in progress");
+        }
+    }
+    let (sample_rate_hz, channels) = {
+        let s = rt.state.lock().unwrap();
+        (
+            s.status.sample_rate_hz.unwrap_or(SIMULATED_SAMPLE_RATE_HZ),
+            if s.status.channel_labels.is_empty() {
+                CHANNEL_LABELS.iter().map(|s| (*s).to_string()).collect()
+            } else {
+                s.status.channel_labels.clone()
+            },
+        )
+    };
+    let metadata = RecordingMetadata {
+        board_id: rt.config.board_id,
+        serial_port: rt.config.serial_port.clone(),
+        sample_rate_hz,
+        channels,
+        target_freqs_hz: rt.config.target_freqs_hz(),
+        created_at_unix: 0,
+    };
+    let data_dir = PathBuf::from(&rt.config.data_dir);
+    match EdgeRecorder::start(&data_dir, metadata) {
+        Ok(rec) => {
+            let session_dir = rec.paths().session_dir.clone();
+            *rt.recorder.lock().unwrap() = Some(rec);
+            json_response(&serde_json::json!({
+                "ok": true,
+                "session_dir": session_dir.to_string_lossy(),
+            }))
+        }
+        Err(err) => {
+            rt.record_error(format!("record/start: {err}"));
+            error_response(500, &format!("record/start failed: {err}"))
+        }
+    }
+}
+
+fn handle_record_stop(rt: &Arc<Runtime>) -> Response<std::io::Cursor<Vec<u8>>> {
+    let rec = rt.recorder.lock().unwrap().take();
+    match rec {
+        Some(r) => {
+            let dir = r.paths().session_dir.clone();
+            if let Err(err) = r.close() {
+                rt.record_error(format!("record/stop: {err}"));
+                return error_response(500, &format!("record/stop failed: {err}"));
+            }
+            json_response(&serde_json::json!({
+                "ok": true,
+                "session_dir": dir.to_string_lossy(),
+            }))
+        }
+        None => error_response(409, "no recording in progress"),
+    }
 }
 
 fn spawn_worker_real(rt: &Arc<Runtime>, mut session: OpenBciSession) -> anyhow::Result<()> {
@@ -155,6 +243,7 @@ fn spawn_worker_real(rt: &Arc<Runtime>, mut session: OpenBciSession) -> anyhow::
 
     let state = rt.state.clone();
     let stop_flag = rt.stop_flag.clone();
+    let recorder = rt.recorder.clone();
     let target_freqs = rt.config.target_freqs_hz();
     let window_seconds = rt.config.window_sec;
 
@@ -171,10 +260,14 @@ fn spawn_worker_real(rt: &Arc<Runtime>, mut session: OpenBciSession) -> anyhow::
             match session.next_sample() {
                 Ok(Some(values)) => {
                     let f32s: Vec<f32> = values.into_iter().map(|v| v as f32).collect();
+                    let t_sec = tick as f32 / sample_rate_hz;
                     push_sample(&state, &f32s);
+                    record_sample(&recorder, t_sec, &f32s);
                     tick += 1;
                     if tick % decode_every == 0 {
-                        run_decoder(&state, &decoder);
+                        if let Some(decision) = run_decoder(&state, &decoder) {
+                            record_decision(&recorder, t_sec, &decision);
+                        }
                     }
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(2)),
@@ -208,6 +301,7 @@ fn spawn_worker_simulated(rt: &Arc<Runtime>) {
 
     let state = rt.state.clone();
     let stop_flag = rt.stop_flag.clone();
+    let recorder = rt.recorder.clone();
     let target_freqs = rt.config.target_freqs_hz();
     let window_seconds = rt.config.window_sec;
 
@@ -228,9 +322,12 @@ fn spawn_worker_simulated(rt: &Arc<Runtime>) {
             let value = (2.0 * std::f32::consts::PI * SIMULATED_TARGET_HZ * t).sin();
             let sample: Vec<f32> = (0..eeg_channels).map(|_| value).collect();
             push_sample(&state, &sample);
+            record_sample(&recorder, t, &sample);
             sample_index += 1;
             if sample_index % decode_every == 0 {
-                run_decoder(&state, &decoder);
+                if let Some(decision) = run_decoder(&state, &decoder) {
+                    record_decision(&recorder, t, &decision);
+                }
             }
             // Sleep based on wall clock so we don't drift.
             let target_elapsed = Duration::from_secs_f32(sample_index as f32 * dt);
@@ -362,6 +459,8 @@ fn route(rt: &Arc<Runtime>, request: Request) -> std::io::Result<()> {
         ("POST", "/stop") => handle_stop(rt),
         ("GET", "/snapshot") => handle_snapshot(rt),
         ("GET", "/decision") => handle_decision(rt),
+        ("POST", "/record/start") => handle_record_start(rt),
+        ("POST", "/record/stop") => handle_record_stop(rt),
         _ => error_response(404, "not found"),
     };
     request.respond(response)
