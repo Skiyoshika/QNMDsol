@@ -44,6 +44,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # --- Windows API ---
 winapi = { version = "0.3.9", features = ["winuser", "windef"] }
 
+# --- Pi 5 edge service ---
+clap = { version = "4.5", features = ["derive", "env"] }
+tiny_http = "0.12"
+
 [profile.release]
 opt-level = "z"
 lto = true
