@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use tiny_http::{Header, Request, Response, Server};
+use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 use crate::edge::config::EdgeConfig;
 use crate::edge::recorder::{EdgeRecorder, RecordingMetadata};
@@ -52,6 +53,22 @@ impl Default for EdgeState {
     }
 }
 
+/// Single push frame delivered over `GET /events` (Server-Sent Events) so VR
+/// / robot middlewares can consume the BCI state without polling.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventFrame {
+    pub t_unix: f64,
+    pub connected: bool,
+    pub streaming: bool,
+    pub simulating: bool,
+    pub sample_rate_hz: Option<f32>,
+    pub eeg_channels: usize,
+    pub latest_decision: Option<SsvepDecision>,
+    /// Latest µV sample, one row of length `eeg_channels`.
+    pub last_sample: Option<Vec<f32>>,
+    pub last_error: Option<String>,
+}
+
 struct Runtime {
     state: Arc<Mutex<EdgeState>>,
     config: EdgeConfig,
@@ -59,6 +76,7 @@ struct Runtime {
     stop_flag: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
     recorder: Arc<Mutex<Option<EdgeRecorder>>>,
+    event_subs: Arc<Mutex<Vec<Sender<EventFrame>>>>,
 }
 
 impl Runtime {
@@ -70,6 +88,7 @@ impl Runtime {
             stop_flag: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(None),
             recorder: Arc::new(Mutex::new(None)),
+            event_subs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -82,7 +101,120 @@ impl Runtime {
 fn json_response<T: Serialize>(value: &T) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{\"ok\":false}".to_vec());
     let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    Response::from_data(body).with_header(header)
+    let cors = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
+    Response::from_data(body).with_header(header).with_header(cors)
+}
+
+fn build_event(state: &Arc<Mutex<EdgeState>>) -> EventFrame {
+    let s = state.lock().unwrap();
+    let last_sample = if !s.channel_buffers.is_empty()
+        && !s.channel_buffers.iter().all(|b| b.is_empty())
+    {
+        Some(
+            s.channel_buffers
+                .iter()
+                .map(|b| b.back().copied().unwrap_or(0.0))
+                .collect(),
+        )
+    } else {
+        None
+    };
+    let t_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    EventFrame {
+        t_unix,
+        connected: s.status.connected,
+        streaming: s.status.streaming,
+        simulating: s.status.simulating,
+        sample_rate_hz: s.status.sample_rate_hz,
+        eeg_channels: s.status.eeg_channels,
+        latest_decision: s.latest_decision.clone(),
+        last_sample,
+        last_error: s.status.last_error.clone(),
+    }
+}
+
+fn publish_event(
+    state: &Arc<Mutex<EdgeState>>,
+    subs: &Arc<Mutex<Vec<Sender<EventFrame>>>>,
+) {
+    let event = build_event(state);
+    let mut guard = subs.lock().unwrap();
+    // Drop subscribers whose receiver was closed (VR client disconnected).
+    guard.retain(|tx| tx.send(event.clone()).is_ok());
+}
+
+/// Read source for SSE: serialises each `EventFrame` from the channel into
+/// `data: <json>\n\n` chunks. tiny_http calls `read` repeatedly while the
+/// HTTP/1.1 connection is open; returning Ok(0) terminates the response.
+struct SseEventStream {
+    rx: std::sync::mpsc::Receiver<EventFrame>,
+    buffer: Vec<u8>,
+    cursor: usize,
+}
+
+impl std::io::Read for SseEventStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.cursor >= self.buffer.len() {
+            self.buffer.clear();
+            self.cursor = 0;
+            // Block until a new event is broadcast, with a periodic
+            // keep-alive comment so proxies don't time out the connection.
+            loop {
+                match self.rx.recv_timeout(Duration::from_secs(15)) {
+                    Ok(event) => {
+                        let json = serde_json::to_string(&event)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        self.buffer = format!("data: {json}\n\n").into_bytes();
+                        break;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        // SSE comment line — ignored by clients but keeps the
+                        // socket warm for any HTTP-aware proxy in the path.
+                        self.buffer = b": keep-alive\n\n".to_vec();
+                        break;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Ok(0);
+                    }
+                }
+            }
+        }
+        let n = buf.len().min(self.buffer.len() - self.cursor);
+        buf[..n].copy_from_slice(&self.buffer[self.cursor..self.cursor + n]);
+        self.cursor += n;
+        Ok(n)
+    }
+}
+
+fn handle_events(rt: &Arc<Runtime>, request: Request) -> std::io::Result<()> {
+    let (tx, rx) = channel::<EventFrame>();
+    // Send a snapshot frame immediately so a freshly connected client doesn't
+    // wait up to 50ms for the first push.
+    let _ = tx.send(build_event(&rt.state));
+    rt.event_subs.lock().unwrap().push(tx);
+
+    let stream = SseEventStream {
+        rx,
+        buffer: Vec::new(),
+        cursor: 0,
+    };
+    let response = Response::new(
+        StatusCode(200),
+        vec![
+            Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).unwrap(),
+            Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap(),
+            Header::from_bytes(&b"Connection"[..], &b"keep-alive"[..]).unwrap(),
+            Header::from_bytes(&b"X-Accel-Buffering"[..], &b"no"[..]).unwrap(),
+            Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+        ],
+        stream,
+        None, // unknown content-length → chunked encoding
+        None,
+    );
+    request.respond(response)
 }
 
 fn ok_response() -> Response<std::io::Cursor<Vec<u8>>> {
@@ -244,6 +376,7 @@ fn spawn_worker_real(rt: &Arc<Runtime>, mut session: OpenBciSession) -> anyhow::
     let state = rt.state.clone();
     let stop_flag = rt.stop_flag.clone();
     let recorder = rt.recorder.clone();
+    let event_subs = rt.event_subs.clone();
     let target_freqs = rt.config.target_freqs_hz();
     let window_seconds = rt.config.window_sec;
 
@@ -256,21 +389,29 @@ fn spawn_worker_real(rt: &Arc<Runtime>, mut session: OpenBciSession) -> anyhow::
         });
         let mut tick = 0u64;
         let decode_every = ((sample_rate_hz / 4.0).max(1.0)) as u64; // ~4 decisions/sec
+        // Push state to /events subscribers ~20 Hz so VR sees fresh frames.
+        let publish_every = ((sample_rate_hz / 20.0).max(1.0)) as u64;
+        let max_batch_samples = ((sample_rate_hz / 10.0).ceil() as usize).clamp(1, 64);
         while !stop_flag.load(Ordering::SeqCst) {
-            match session.next_sample() {
-                Ok(Some(values)) => {
-                    let f32s: Vec<f32> = values.into_iter().map(|v| v as f32).collect();
-                    let t_sec = tick as f32 / sample_rate_hz;
-                    push_sample(&state, &f32s);
-                    record_sample(&recorder, t_sec, &f32s);
-                    tick += 1;
-                    if tick % decode_every == 0 {
-                        if let Some(decision) = run_decoder(&state, &decoder) {
-                            record_decision(&recorder, t_sec, &decision);
+            match session.drain_samples(max_batch_samples) {
+                Ok(samples) if !samples.is_empty() => {
+                    for values in samples {
+                        let f32s: Vec<f32> = values.into_iter().map(|v| v as f32).collect();
+                        let t_sec = tick as f32 / sample_rate_hz;
+                        push_sample(&state, &f32s);
+                        record_sample(&recorder, t_sec, &f32s);
+                        tick += 1;
+                        if tick % decode_every == 0 {
+                            if let Some(decision) = run_decoder(&state, &decoder) {
+                                record_decision(&recorder, t_sec, &decision);
+                            }
+                        }
+                        if tick % publish_every == 0 {
+                            publish_event(&state, &event_subs);
                         }
                     }
                 }
-                Ok(None) => thread::sleep(Duration::from_millis(2)),
+                Ok(_) => thread::sleep(Duration::from_millis(2)),
                 Err(err) => {
                     let mut s = state.lock().unwrap();
                     s.status.last_error = Some(format!("acquisition: {err}"));
@@ -302,6 +443,7 @@ fn spawn_worker_simulated(rt: &Arc<Runtime>) {
     let state = rt.state.clone();
     let stop_flag = rt.stop_flag.clone();
     let recorder = rt.recorder.clone();
+    let event_subs = rt.event_subs.clone();
     let target_freqs = rt.config.target_freqs_hz();
     let window_seconds = rt.config.window_sec;
 
@@ -316,6 +458,7 @@ fn spawn_worker_simulated(rt: &Arc<Runtime>) {
         let started = Instant::now();
         let mut sample_index: u64 = 0;
         let decode_every = (SIMULATED_SAMPLE_RATE_HZ as u64 / 4).max(1);
+        let publish_every = (SIMULATED_SAMPLE_RATE_HZ as u64 / 20).max(1);
         let tick_dur = Duration::from_secs_f32(dt);
         while !stop_flag.load(Ordering::SeqCst) {
             let t = sample_index as f32 * dt;
@@ -328,6 +471,9 @@ fn spawn_worker_simulated(rt: &Arc<Runtime>) {
                 if let Some(decision) = run_decoder(&state, &decoder) {
                     record_decision(&recorder, t, &decision);
                 }
+            }
+            if sample_index % publish_every == 0 {
+                publish_event(&state, &event_subs);
             }
             // Sleep based on wall clock so we don't drift.
             let target_elapsed = Duration::from_secs_f32(sample_index as f32 * dt);
@@ -451,6 +597,39 @@ fn handle_decision(rt: &Arc<Runtime>) -> Response<std::io::Cursor<Vec<u8>>> {
 fn route(rt: &Arc<Runtime>, request: Request) -> std::io::Result<()> {
     let path = request.url().split('?').next().unwrap_or("/").to_string();
     let method = request.method().as_str().to_string();
+
+    // /events is a long-lived SSE stream — handle it on its own thread so the
+    // main accept loop keeps serving short requests.
+    if method == "GET" && path == "/events" {
+        let rt2 = Arc::clone(rt);
+        thread::spawn(move || {
+            if let Err(err) = handle_events(&rt2, request) {
+                eprintln!("/events stream closed: {err}");
+            }
+        });
+        return Ok(());
+    }
+    if method == "OPTIONS" {
+        // CORS preflight for browser-based VR clients.
+        let resp = Response::from_string("")
+            .with_status_code(204)
+            .with_header(
+                Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+            )
+            .with_header(
+                Header::from_bytes(
+                    &b"Access-Control-Allow-Methods"[..],
+                    &b"GET,POST,OPTIONS"[..],
+                )
+                .unwrap(),
+            )
+            .with_header(
+                Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..])
+                    .unwrap(),
+            );
+        return request.respond(resp);
+    }
+
     let response = match (method.as_str(), path.as_str()) {
         ("GET", "/health") => ok_response(),
         ("GET", "/status") => handle_status(rt),
