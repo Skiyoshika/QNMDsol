@@ -53,6 +53,102 @@ impl Default for EdgeState {
     }
 }
 
+/// Coarse verdict on whether the incoming EEG is trustworthy. Consumers
+/// (VR / robot middleware) should ignore `latest_decision` unless this is
+/// `Ok` — a railed headset will otherwise produce confident-looking but
+/// meaningless frequency picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalQuality {
+    /// Signal is in a plausible µV range — decision can be used.
+    Ok,
+    /// Most channels are pinned at the ADS1299 full-scale rail
+    /// (±187500 µV). Electrodes are not contacting scalp, or the
+    /// reference (BIAS/SRB) is not connected. Decision is meaningless.
+    Railed,
+    /// No samples buffered yet (not connected / not streaming).
+    NoSignal,
+}
+
+/// Fraction of recent samples per channel above this absolute value counts as
+/// railed. Mirrors `crate::quality::RAILED_ABS_UV` (Cyton ADS1299 full scale).
+const RAILED_WINDOW: usize = 128;
+const RAILED_SAMPLE_FRAC: f32 = 0.5;
+const RAILED_CHANNEL_FRAC: f32 = 0.5;
+
+struct QualityVerdict {
+    quality: SignalQuality,
+    railed_channels: usize,
+    assessed_channels: usize,
+    hint: Option<String>,
+}
+
+fn assess_signal_quality(state: &EdgeState) -> QualityVerdict {
+    if state.channel_buffers.is_empty()
+        || state.channel_buffers.iter().all(|b| b.is_empty())
+    {
+        return QualityVerdict {
+            quality: SignalQuality::NoSignal,
+            railed_channels: 0,
+            assessed_channels: 0,
+            hint: Some(
+                "无数据流：先 POST /connect 再 POST /start，并确认 OpenBCI 板已开机配对。"
+                    .to_string(),
+            ),
+        };
+    }
+
+    let mut railed = 0usize;
+    let mut assessed = 0usize;
+    for buf in &state.channel_buffers {
+        if buf.is_empty() {
+            continue;
+        }
+        assessed += 1;
+        let take = buf.len().min(RAILED_WINDOW);
+        if take == 0 {
+            continue;
+        }
+        let railed_n = buf
+            .iter()
+            .rev()
+            .take(take)
+            .filter(|v| v.abs() >= crate::quality::RAILED_ABS_UV)
+            .count();
+        if railed_n as f32 / take as f32 > RAILED_SAMPLE_FRAC {
+            railed += 1;
+        }
+    }
+
+    if assessed == 0 {
+        return QualityVerdict {
+            quality: SignalQuality::NoSignal,
+            railed_channels: 0,
+            assessed_channels: 0,
+            hint: Some("尚无样本。".to_string()),
+        };
+    }
+
+    if railed as f32 / assessed as f32 >= RAILED_CHANNEL_FRAC {
+        return QualityVerdict {
+            quality: SignalQuality::Railed,
+            railed_channels: railed,
+            assessed_channels: assessed,
+            hint: Some(format!(
+                "{railed}/{assessed} 通道饱和 (±187500µV ADC 满量程)：电极未接触头皮，\
+                 或参考电极 BIAS/SRB 未接好。decision 不可信，先修电极接触。"
+            )),
+        };
+    }
+
+    QualityVerdict {
+        quality: SignalQuality::Ok,
+        railed_channels: railed,
+        assessed_channels: assessed,
+        hint: None,
+    }
+}
+
 /// Single push frame delivered over `GET /events` (Server-Sent Events) so VR
 /// / robot middlewares can consume the BCI state without polling.
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +159,12 @@ pub struct EventFrame {
     pub simulating: bool,
     pub sample_rate_hz: Option<f32>,
     pub eeg_channels: usize,
+    /// Trust gate for `latest_decision`. See `SignalQuality`.
+    pub signal_quality: SignalQuality,
+    /// How many channels were pinned at the rail in the recent window.
+    pub railed_channels: usize,
+    /// Human-readable explanation when `signal_quality != Ok`.
+    pub signal_hint: Option<String>,
     pub latest_decision: Option<SsvepDecision>,
     /// Latest µV sample, one row of length `eeg_channels`.
     pub last_sample: Option<Vec<f32>>,
@@ -123,6 +225,21 @@ fn build_event(state: &Arc<Mutex<EdgeState>>) -> EventFrame {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+
+    let verdict = assess_signal_quality(&s);
+    // When the headset is railed, never forward a confident decision —
+    // it would just be FFT noise on a saturated rail. Downgrade the copy
+    // we emit (stored state is untouched so /snapshot still shows raw µV).
+    let latest_decision = match (&s.latest_decision, verdict.quality) {
+        (Some(d), SignalQuality::Ok) => Some(d.clone()),
+        (Some(d), _) => Some(SsvepDecision {
+            best_freq_hz: None,
+            confident: false,
+            ..d.clone()
+        }),
+        (None, _) => None,
+    };
+
     EventFrame {
         t_unix,
         connected: s.status.connected,
@@ -130,7 +247,10 @@ fn build_event(state: &Arc<Mutex<EdgeState>>) -> EventFrame {
         simulating: s.status.simulating,
         sample_rate_hz: s.status.sample_rate_hz,
         eeg_channels: s.status.eeg_channels,
-        latest_decision: s.latest_decision.clone(),
+        signal_quality: verdict.quality,
+        railed_channels: verdict.railed_channels,
+        signal_hint: verdict.hint,
+        latest_decision,
         last_sample,
         last_error: s.status.last_error.clone(),
     }
@@ -575,6 +695,7 @@ fn handle_snapshot(rt: &Arc<Runtime>) -> Response<std::io::Cursor<Vec<u8>>> {
     let s = rt.state.lock().unwrap();
     let labels = s.status.channel_labels.clone();
     let sample_rate_hz = s.status.sample_rate_hz;
+    let verdict = assess_signal_quality(&s);
     let channels: Vec<Vec<f32>> = s
         .channel_buffers
         .iter()
@@ -583,14 +704,32 @@ fn handle_snapshot(rt: &Arc<Runtime>) -> Response<std::io::Cursor<Vec<u8>>> {
     json_response(&serde_json::json!({
         "sample_rate_hz": sample_rate_hz,
         "channel_labels": labels,
+        "signal_quality": verdict.quality,
+        "railed_channels": verdict.railed_channels,
+        "signal_hint": verdict.hint,
         "channels": channels,
     }))
 }
 
 fn handle_decision(rt: &Arc<Runtime>) -> Response<std::io::Cursor<Vec<u8>>> {
     let s = rt.state.lock().unwrap();
+    let verdict = assess_signal_quality(&s);
+    // Mirror the SSE behaviour: do not hand back a confident pick on a
+    // railed/absent signal.
+    let decision = match (&s.latest_decision, verdict.quality) {
+        (Some(d), SignalQuality::Ok) => Some(d.clone()),
+        (Some(d), _) => Some(SsvepDecision {
+            best_freq_hz: None,
+            confident: false,
+            ..d.clone()
+        }),
+        (None, _) => None,
+    };
     json_response(&serde_json::json!({
-        "decision": s.latest_decision,
+        "decision": decision,
+        "signal_quality": verdict.quality,
+        "railed_channels": verdict.railed_channels,
+        "signal_hint": verdict.hint,
     }))
 }
 
@@ -657,4 +796,68 @@ pub fn run_edge_service(config: EdgeConfig) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with(channels: Vec<Vec<f32>>) -> EdgeState {
+        let mut s = EdgeState::default();
+        s.status.eeg_channels = channels.len();
+        s.channel_buffers = channels.into_iter().map(|c| c.into_iter().collect()).collect();
+        s
+    }
+
+    #[test]
+    fn no_signal_when_buffers_empty() {
+        let s = EdgeState::default();
+        let v = assess_signal_quality(&s);
+        assert_eq!(v.quality, SignalQuality::NoSignal);
+        assert_eq!(v.railed_channels, 0);
+        assert!(v.hint.is_some());
+    }
+
+    #[test]
+    fn ok_for_plausible_microvolt_signal() {
+        // 16 channels of small sinusoid-ish values, well under the rail.
+        let channels: Vec<Vec<f32>> = (0..16)
+            .map(|_| (0..200).map(|i| 20.0 * ((i as f32) * 0.1).sin()).collect())
+            .collect();
+        let s = state_with(channels);
+        let v = assess_signal_quality(&s);
+        assert_eq!(v.quality, SignalQuality::Ok);
+        assert_eq!(v.railed_channels, 0);
+        assert!(v.hint.is_none());
+    }
+
+    #[test]
+    fn railed_when_channels_pinned_at_full_scale() {
+        // Reproduces the colleague's Pi screenshot: every channel stuck at
+        // the ADS1299 negative rail (-187500 µV).
+        let channels: Vec<Vec<f32>> = (0..16)
+            .map(|_| vec![-187_500.015_625_f32; 200])
+            .collect();
+        let s = state_with(channels);
+        let v = assess_signal_quality(&s);
+        assert_eq!(v.quality, SignalQuality::Railed);
+        assert_eq!(v.railed_channels, 16);
+        assert_eq!(v.assessed_channels, 16);
+        assert!(v.hint.unwrap().contains("饱和"));
+    }
+
+    #[test]
+    fn ok_when_only_a_minority_railed() {
+        // 4 of 16 railed should still be usable (a couple of bad electrodes).
+        let mut channels: Vec<Vec<f32>> = (0..12)
+            .map(|_| (0..200).map(|i| 15.0 * ((i as f32) * 0.2).cos()).collect())
+            .collect();
+        for _ in 0..4 {
+            channels.push(vec![187_500.0_f32; 200]);
+        }
+        let s = state_with(channels);
+        let v = assess_signal_quality(&s);
+        assert_eq!(v.quality, SignalQuality::Ok);
+        assert_eq!(v.railed_channels, 4);
+    }
 }

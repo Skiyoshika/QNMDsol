@@ -31,6 +31,9 @@ Each `data:` line is one `EventFrame` JSON object:
   "simulating": false,
   "sample_rate_hz": 125.0,
   "eeg_channels": 16,
+  "signal_quality": "ok",
+  "railed_channels": 0,
+  "signal_hint": null,
   "latest_decision": {
     "best_freq_hz": 12.0,
     "confident": true,
@@ -44,10 +47,25 @@ Each `data:` line is one `EventFrame` JSON object:
 
 - `t_unix` — wall-clock seconds since UNIX epoch on the Pi when the frame was
   built. Use it to detect dropped frames or to align with external sensors.
+- `signal_quality` — **trust gate. Read this before `latest_decision`.**
+  - `"ok"` — µV in a plausible range, decision is usable.
+  - `"railed"` — most channels pinned at the ADS1299 ±187500 µV full scale.
+    Electrodes are not contacting scalp, or the BIAS/SRB reference is not
+    connected. `latest_decision` is force-downgraded to
+    `best_freq_hz: null, confident: false` so a saturated headset cannot
+    drive your VR cursor with garbage. `railed_channels` tells you how many
+    of the channels are bad; `signal_hint` is a human string for the HUD.
+  - `"no_signal"` — nothing buffered yet (not connected / not streaming).
+- `railed_channels` — count of channels stuck at the rail in the recent
+  window. `0` when healthy.
+- `signal_hint` — `null` when `signal_quality == "ok"`, otherwise a
+  human-readable Chinese explanation suitable for surfacing on the operator
+  HUD.
 - `latest_decision` — same `SsvepDecision` object that `/decision` returns.
   `null` until enough samples have accumulated (the first few hundred ms
   after `/start`). Bind your VR cursor or robot pose target to
-  `best_freq_hz` only when `confident == true`.
+  `best_freq_hz` only when `confident == true` **and**
+  `signal_quality == "ok"`.
 - `last_sample` — most recent µV reading per channel (`sample_rate_hz` rate
   is preserved on the wire, but only the most recent sample is included to
   keep frame size bounded). For waveform plotting, use `/snapshot` once
@@ -67,6 +85,11 @@ const events = new EventSource("http://<pi-ip>:8765/events");
 events.onmessage = (msg) => {
   const frame = JSON.parse(msg.data);
   if (!frame.streaming) return;
+  if (frame.signal_quality !== "ok") {
+    // Headset railed or not connected — show the hint, don't act on decision.
+    showHudWarning(frame.signal_hint);
+    return;
+  }
   if (frame.latest_decision?.confident) {
     const target = frame.latest_decision.best_freq_hz;
     // map 8/12/15/20 Hz -> action; e.g. left / forward / right / select
