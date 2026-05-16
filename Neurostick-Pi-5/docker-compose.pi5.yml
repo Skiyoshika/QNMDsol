@@ -1,0 +1,20 @@
+services:
+  neurostick-pi5-edge:
+    build:
+      context: ..
+      dockerfile: Neurostick-Pi-5/Dockerfile
+    image: neurostick-pi5-edge:local
+    container_name: neurostick-pi5-edge
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    devices:
+      - "${OPENBCI_DEVICE:-/dev/serial/by-id/replace-me}:/dev/openbci"
+    environment:
+      OPENBCI_SERIAL: /dev/openbci
+      OPENBCI_BOARD_ID: "2"
+      NEUROSTICK_DATA_DIR: /data
+      SSVEP_TARGET_FREQS: "8,12,15,20"
+      SSVEP_WINDOW_SEC: "2.0"
+    volumes:
+      - ./data:/data

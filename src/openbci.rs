@@ -5,9 +5,29 @@ use serde::Serialize;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int};
 use std::path::PathBuf;
-const BOARD_ID_CYTON_DAISY: c_int = 2; // matches python trainer script
+pub const BOARD_ID_CYTON: c_int = 0;
+pub const BOARD_ID_CYTON_DAISY: c_int = 2; // matches python trainer script
 const PRESET_DEFAULT: c_int = 0;
 const STREAM_RINGBUF_PACKETS: c_int = 450_000;
+
+fn brainflow_library_candidates() -> Vec<String> {
+    if let Ok(path) = std::env::var("BRAINFLOW_BOARD_CONTROLLER") {
+        if !path.trim().is_empty() {
+            return vec![path];
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if cfg!(target_os = "windows") {
+        candidates.push("BoardController.dll".to_owned());
+    } else if cfg!(target_os = "macos") {
+        candidates.push("libBoardController.dylib".to_owned());
+    } else {
+        candidates.push("/opt/brainflow/lib/libBoardController.so".to_owned());
+        candidates.push("libBoardController.so".to_owned());
+    }
+    candidates
+}
 #[derive(Serialize)]
 struct BrainFlowInputParams {
     serial_port: String,
@@ -73,9 +93,28 @@ struct BrainFlowApi {
 }
 impl BrainFlowApi {
     fn load() -> Result<Self> {
-        // BoardController.dll must be next to the executable (already shipped in repo root).
-        let lib = unsafe { Library::new("BoardController.dll") }
-            .context("BoardController.dll not found in working directory")?;
+        // BoardController native library must be discoverable. On Windows the DLL is shipped in the
+        // repo root next to the executable; on Linux/macOS the library is resolved by candidate path
+        // or `BRAINFLOW_BOARD_CONTROLLER` env override.
+        let mut last_error = None;
+        let mut loaded = None;
+        for candidate in brainflow_library_candidates() {
+            match unsafe { Library::new(&candidate) } {
+                Ok(lib) => {
+                    loaded = Some(lib);
+                    break;
+                }
+                Err(err) => {
+                    last_error = Some(format!("{candidate}: {err}"));
+                }
+            }
+        }
+        let lib = loaded.ok_or_else(|| {
+            anyhow!(
+                "BrainFlow BoardController library not found. Set BRAINFLOW_BOARD_CONTROLLER. Last error: {}",
+                last_error.unwrap_or_else(|| "no candidates tried".to_owned())
+            )
+        })?;
         // Safety: we assume BrainFlow C API signatures from the official package.
         unsafe {
             let set_log_level = lib
@@ -260,6 +299,7 @@ impl BrainFlowApi {
 /// get properly scaled EEG samples.
 pub struct OpenBciSession {
     port_name: String,
+    board_id: c_int,
     api: &'static BrainFlowApi,
     input_json: CString,
     eeg_channels: Vec<c_int>,
@@ -271,17 +311,23 @@ pub struct OpenBciSession {
 impl OpenBciSession {
     /// Connects and prepares a BrainFlow session for Cyton+Daisy (board id 2).
     pub fn connect(port_name: &str) -> Result<Self> {
+        Self::connect_with_board_id(port_name, BOARD_ID_CYTON_DAISY)
+    }
+
+    /// Connects with a caller-supplied BrainFlow board id (e.g. 0 for Cyton, 2 for Cyton+Daisy).
+    pub fn connect_with_board_id(port_name: &str, board_id: c_int) -> Result<Self> {
         let api = BrainFlowApi::instance()?;
         let params = BrainFlowInputParams::for_serial(port_name);
         let json = serde_json::to_string(&params)?;
         let input_json =
             CString::new(json).context("failed to encode BrainFlow input params to C string")?;
-        api.prepare(BOARD_ID_CYTON_DAISY, &input_json)?;
-        let sample_rate_hz = api.sampling_rate(BOARD_ID_CYTON_DAISY)? as f32;
-        let num_rows = api.num_rows(BOARD_ID_CYTON_DAISY)? as usize;
-        let eeg_channels = api.eeg_channels(BOARD_ID_CYTON_DAISY, num_rows)?;
+        api.prepare(board_id, &input_json)?;
+        let sample_rate_hz = api.sampling_rate(board_id)? as f32;
+        let num_rows = api.num_rows(board_id)? as usize;
+        let eeg_channels = api.eeg_channels(board_id, num_rows)?;
         Ok(Self {
             port_name: port_name.to_string(),
+            board_id,
             api,
             input_json,
             eeg_channels,
@@ -294,6 +340,9 @@ impl OpenBciSession {
     pub fn port_name(&self) -> &str {
         &self.port_name
     }
+    pub fn board_id(&self) -> c_int {
+        self.board_id
+    }
     pub fn sample_rate_hz(&self) -> f32 {
         self.sample_rate_hz
     }
@@ -305,8 +354,7 @@ impl OpenBciSession {
             return Err(anyhow!("session already released; reconnect required"));
         }
         if !self.is_streaming {
-            self.api
-                .start_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
+            self.api.start_stream(self.board_id, &self.input_json)?;
             self.is_streaming = true;
         }
         Ok(())
@@ -316,8 +364,7 @@ impl OpenBciSession {
             return Ok(());
         }
         if self.is_streaming {
-            self.api
-                .stop_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
+            self.api.stop_stream(self.board_id, &self.input_json)?;
             self.is_streaming = false;
         }
         Ok(())
@@ -331,7 +378,7 @@ impl OpenBciSession {
         if self.is_streaming {
             let _ = self.stop_stream();
         }
-        self.api.release(BOARD_ID_CYTON_DAISY, &self.input_json)?;
+        self.api.release(self.board_id, &self.input_json)?;
         self.released = true;
         Ok(())
     }
@@ -341,7 +388,7 @@ impl OpenBciSession {
         let max_samples = 5;
         let mut buf = vec![0.0f64; self.num_rows * max_samples];
         let available = self.api.current_board_data(
-            BOARD_ID_CYTON_DAISY,
+            self.board_id,
             self.num_rows,
             &self.input_json,
             max_samples,
