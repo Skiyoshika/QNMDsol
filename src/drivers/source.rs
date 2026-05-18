@@ -54,3 +54,57 @@ impl SignalSource for ManualSource {
         Ok(self.queue.pop_front())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_batch(rate: f32, n: usize) -> SignalBatch {
+        SignalBatch {
+            started_at: SystemTime::now(),
+            sample_rate_hz: rate,
+            samples: vec![vec![0.0; n]],
+            channel_labels: vec!["Ch1".into()],
+        }
+    }
+
+    #[test]
+    fn batch_validate_accepts_valid() {
+        let b = dummy_batch(250.0, 100);
+        assert!(b.validate().is_ok());
+    }
+
+    #[test]
+    fn batch_validate_rejects_zero_rate() {
+        let b = dummy_batch(0.0, 100);
+        assert!(b.validate().is_err());
+    }
+
+    #[test]
+    fn batch_validate_rejects_label_mismatch() {
+        let b = SignalBatch {
+            started_at: SystemTime::now(),
+            sample_rate_hz: 250.0,
+            samples: vec![vec![0.0; 10], vec![0.0; 10]],
+            channel_labels: vec!["Ch1".into()],
+        };
+        assert!(b.validate().is_err());
+    }
+
+    #[test]
+    fn batch_duration_correct() {
+        let b = dummy_batch(100.0, 200);
+        let dur = b.duration().unwrap();
+        assert!((dur.as_secs_f32() - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn manual_source_drains_queue() {
+        let mut src = ManualSource::new(vec![dummy_batch(250.0, 10), dummy_batch(250.0, 20)]);
+        let b1 = src.next_batch().unwrap().unwrap();
+        assert_eq!(b1.samples[0].len(), 10);
+        let b2 = src.next_batch().unwrap().unwrap();
+        assert_eq!(b2.samples[0].len(), 20);
+        assert!(src.next_batch().unwrap().is_none());
+    }
+}

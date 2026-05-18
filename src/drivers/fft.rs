@@ -51,3 +51,68 @@ impl SpectrumBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drivers::buffer::TimeSeriesFrame;
+    use std::f32::consts::PI;
+
+    fn sine_frame(freq_hz: f32, sample_rate: f32, n_samples: usize) -> TimeSeriesFrame {
+        let samples: Vec<f32> = (0..n_samples)
+            .map(|i| (2.0 * PI * freq_hz * i as f32 / sample_rate).sin())
+            .collect();
+        TimeSeriesFrame {
+            sample_rate_hz: sample_rate,
+            channel_labels: vec!["Ch1".into()],
+            samples: vec![samples],
+        }
+    }
+
+    #[test]
+    fn fft_detects_dominant_frequency() {
+        let frame = sine_frame(10.0, 256.0, 256);
+        let builder = SpectrumBuilder::with_size(256);
+        let spectrum = builder.compute(&frame);
+        assert_eq!(spectrum.magnitudes.len(), 1);
+        assert_eq!(spectrum.frequencies_hz.len(), 128);
+        let peak_bin = spectrum.magnitudes[0]
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        let peak_freq = spectrum.frequencies_hz[peak_bin];
+        assert!((peak_freq - 10.0).abs() < 2.0, "peak at {peak_freq} Hz, expected ~10 Hz");
+    }
+
+    #[test]
+    fn fft_output_shape_matches_half_size() {
+        let frame = sine_frame(20.0, 500.0, 128);
+        let builder = SpectrumBuilder::with_size(64);
+        let spectrum = builder.compute(&frame);
+        assert_eq!(spectrum.frequencies_hz.len(), 32);
+        assert_eq!(spectrum.magnitudes[0].len(), 32);
+    }
+
+    #[test]
+    fn fft_dc_component_near_zero_for_sine() {
+        let frame = sine_frame(25.0, 250.0, 250);
+        let builder = SpectrumBuilder::with_size(250);
+        let spectrum = builder.compute(&frame);
+        assert!(spectrum.magnitudes[0][0] < 0.01, "DC should be near zero for pure sine");
+    }
+
+    #[test]
+    fn fft_multichannel() {
+        let frame = TimeSeriesFrame {
+            sample_rate_hz: 256.0,
+            channel_labels: vec!["Ch1".into(), "Ch2".into(), "Ch3".into()],
+            samples: vec![vec![0.0; 64]; 3],
+        };
+        let builder = SpectrumBuilder::with_size(64);
+        let spectrum = builder.compute(&frame);
+        assert_eq!(spectrum.magnitudes.len(), 3);
+        assert_eq!(spectrum.channel_labels.len(), 3);
+    }
+}

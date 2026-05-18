@@ -1907,6 +1907,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "neurostick"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui_plot",
+ "env_logger",
+ "image 0.25.9",
+ "libloading 0.8.9",
+ "log",
+ "ndarray",
+ "once_cell",
+ "plotters",
+ "rand",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "serialport",
+ "thiserror 1.0.69",
+ "winapi",
+]
+
+[[package]]
 name = "nix"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2397,29 +2420,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3502d6155304a4173a5f2c34b52b7ed0dd085890326cb50fd625fdf39e86b3b"
 dependencies = [
  "num-traits",
-]
-
-[[package]]
-name = "qnmd_sol"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "egui_plot",
- "env_logger",
- "image 0.25.9",
- "libloading 0.8.9",
- "log",
- "ndarray",
- "once_cell",
- "plotters",
- "rand",
- "rustfft",
- "serde",
- "serde_json",
- "serialport",
- "thiserror 1.0.69",
- "winapi",
 ]
 
 [[package]]
