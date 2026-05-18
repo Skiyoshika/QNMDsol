@@ -18,8 +18,6 @@ use egui_plot::{Line, Plot, PlotBounds, PlotPoints, Text};
 use serde::Deserialize;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::{fs, io::Write, path::PathBuf, time::Instant, time::SystemTime};
-// 引入串口库
-use serialport;
 
 #[derive(Debug, Clone, Deserialize)]
 struct BrainModel {
@@ -719,8 +717,8 @@ impl QnmdSolApp {
                             let mut points: Vec<[f64; 2]> = Vec::new();
                             for sample in samples.iter().step_by(step) {
                                 let scaled = sample.value as f64
-                                    * self.display_gain as f64
-                                    * self.signal_sensitivity as f64
+                                    * self.display_gain
+                                    * self.signal_sensitivity
                                     * uv_to_height;
                                 let prev = self.wave_smooth_state.get(idx).copied().unwrap_or(0.0);
                                 let smoothed = if smooth_alpha <= 0.0 || smooth_alpha >= 1.0 {
@@ -1056,7 +1054,7 @@ impl QnmdSolApp {
                 self.resistance_labels.clone()
             };
             // 循环高亮每个通道，便于“轮询”查看
-            if values.len() > 0 {
+            if !values.is_empty() {
                 let now = Instant::now();
                 let advance = match self.impedance_last_cycle {
                     Some(t) => t.elapsed().as_millis() > 600,
@@ -1094,11 +1092,11 @@ impl QnmdSolApp {
                 ui.label(format!("{} {:.1}s", self.text(UiText::Window), window));
             }
             if let Some(first) = values.first() {
-                let ganglion_k = ganglion_display_impedance_kohms((*first as f32) / 1000.0);
+                let ganglion_k = ganglion_display_impedance_kohms(*first / 1000.0);
                 ui.label(format!("Ganglion 显示(kΩ)：{:.2}", ganglion_k));
             }
             if let Some(frame) = self.last_frame.as_ref() {
-                if let Some(ch) = frame.samples.get(0) {
+                if let Some(ch) = frame.samples.first() {
                     let mean: f32 = ch.iter().copied().sum::<f32>() / ch.len().max(1) as f32;
                     let variance: f32 = ch
                         .iter()

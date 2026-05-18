@@ -82,7 +82,7 @@ impl ChannelState {
         // Shift timestamps so callers can draw relative to the newest point if they want.
         let newest_time = samples.last().map(|s| s.time).unwrap_or(0.0);
         for s in &mut samples {
-            s.time = s.time - newest_time;
+            s.time -= newest_time;
         }
         Some(ChannelView {
             index: self.config.index,

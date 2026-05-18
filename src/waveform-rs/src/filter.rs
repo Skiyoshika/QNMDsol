@@ -83,14 +83,14 @@ fn design_sections(sample_rate_hz: f32, kind: FilterKind) -> Vec<BiquadFilter> {
         FilterKind::Bandpass { low_hz, high_hz, q } => {
             let (low, high) = band_edges(low_hz, high_hz, nyquist);
             let center = (low * high).sqrt();
-            let q_val = q.max(0.1).min(100.0).min(center / (high - low));
+            let q_val = q.clamp(0.1, 100.0).min(center / (high - low));
             let coeffs = bandpass(center, sample_rate_hz, q_val);
             vec![BiquadFilter::new(coeffs)]
         }
         FilterKind::Bandstop { low_hz, high_hz, q } => {
             let (low, high) = band_edges(low_hz, high_hz, nyquist);
             let center = (low * high).sqrt();
-            let q_val = q.max(0.1).min(100.0).min(center / (high - low));
+            let q_val = q.clamp(0.1, 100.0).min(center / (high - low));
             let coeffs = notch(center, sample_rate_hz, q_val);
             vec![BiquadFilter::new(coeffs)]
         }

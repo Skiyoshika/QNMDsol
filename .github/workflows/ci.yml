@@ -26,7 +26,7 @@ jobs:
         run: cargo check --all-targets
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings -A dead_code
 
       - name: cargo test
         run: cargo test

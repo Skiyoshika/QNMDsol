@@ -59,7 +59,7 @@ pub fn render_waveform_png(
             .build_cartesian_2d(0f32..frame.samples[0].len() as f32, y_bounds.0..y_bounds.1)?;
         chart
             .configure_mesh()
-            .light_line_style(&WHITE.mix(0.1))
+            .light_line_style(WHITE.mix(0.1))
             .draw()?;
         for (idx, channel) in frame.samples.iter().enumerate() {
             let color = style.palette[idx % style.palette.len()];
@@ -73,12 +73,12 @@ pub fn render_waveform_png(
                         .cloned()
                         .unwrap_or_else(|| format!("Ch {idx}")),
                 )
-                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &color));
+                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
         }
         chart
             .configure_series_labels()
-            .border_style(&WHITE.mix(0.2))
-            .background_style(&style.background)
+            .border_style(WHITE.mix(0.2))
+            .background_style(style.background)
             .draw()?;
         root.present()?;
     }
@@ -115,7 +115,7 @@ pub fn render_spectrum_png(
             )?;
         chart
             .configure_mesh()
-            .light_line_style(&WHITE.mix(0.1))
+            .light_line_style(WHITE.mix(0.1))
             .draw()?;
         for (idx, mags) in spectrum.magnitudes.iter().enumerate() {
             let color = style.palette[idx % style.palette.len()];
@@ -133,12 +133,12 @@ pub fn render_spectrum_png(
                         .cloned()
                         .unwrap_or_else(|| format!("Ch {idx}")),
                 )
-                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &color));
+                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
         }
         chart
             .configure_series_labels()
-            .border_style(&WHITE.mix(0.2))
-            .background_style(&style.background)
+            .border_style(WHITE.mix(0.2))
+            .background_style(style.background)
             .draw()?;
         root.present()?;
     }
