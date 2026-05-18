@@ -271,11 +271,11 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         openbci = None;
                         tx.send(BciMessage::Status(false)).ok();
                     }
-                    GuiCommand::StartStream => { if is_active { 
-                        is_streaming = true; 
+                    GuiCommand::StartStream if is_active => {
+                        is_streaming = true;
                         if let Some(s) = openbci.as_mut() { s.start_stream().ok(); }
                         tx.send(BciMessage::Log("🌊 Stream Started".to_owned())).ok();
-                    }}
+                    }
                     GuiCommand::StopStream => { 
                         is_streaming = false; 
                         if let Some(s) = openbci.as_mut() { s.stop_stream().ok(); }
